@@ -1,0 +1,17 @@
+{
+  "Records": [
+    {
+      "eventSource": "aws:s3",
+      "eventName": "ObjectCreated:Post",
+      "awsRegion": "example-region-1",
+      "s3": {
+        "bucket": { "name": "example-private-source-bucket" },
+        "object": {
+          "key": "incoming/example-job-123/photo.jpg",
+          "size": 524288,
+          "eTag": "example-etag"
+        }
+      }
+    }
+  ]
+}
