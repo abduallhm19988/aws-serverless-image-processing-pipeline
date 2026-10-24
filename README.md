@@ -18,12 +18,12 @@ The client does not need to keep an HTTP request open while the image is being p
 
 ## End-to-End Workflow
 
-1. **Request an upload URL.** The client calls an Amazon API Gateway endpoint. An AWS Lambda function creates a short-lived S3 pre-signed URL and returns it with the object key/job identifier.
+1. **Request an upload URL.** The client calls an Amazon API Gateway endpoint. An AWS Lambda function creates a short-lived S3 pre-signed URL and returns it with the target object key.
 2. **Upload directly to S3.** The client uses the pre-signed URL to upload the image to the private source bucket (for example, under the `incoming/` prefix). The image bytes do not pass through API Gateway or Lambda.
 3. **Queue the upload event.** An S3 `ObjectCreated` notification sends a message to an Amazon SQS processing queue. The queue decouples uploads from image processing and absorbs bursts of traffic.
 4. **Start the workflow.** A queue-processing Lambda consumes SQS messages and starts an AWS Step Functions execution for each image job.
 5. **Process the image.** Step Functions coordinates the steps: validate file type/size, resize the image, apply a watermark, write the processed image to the destination bucket, and update the metadata record.
-6. **Record status and notify.** Amazon DynamoDB stores job metadata and states such as `UPLOADING`, `PROCESSING`, `COMPLETED`, or `FAILED`. Amazon SNS sends success/failure notifications to configured subscribers.
+6. **Record status and notify.** Amazon DynamoDB stores job metadata and processing states such as `PROCESSING`, `COMPLETED`, or `FAILED`. Amazon SNS sends success/failure notifications to configured subscribers.
 7. **Deliver the result.** Amazon CloudFront serves processed images from the destination S3 bucket. Origin Access Control (OAC) and the bucket policy keep the bucket private and restrict origin access to the distribution.
 
 ## AWS Services and Responsibilities
@@ -31,7 +31,7 @@ The client does not need to keep an HTTP request open while the image is being p
 | AWS service | Responsibility |
 |---|---|
 | Amazon API Gateway | Exposes the upload-URL request endpoint |
-| AWS Lambda — Upload URL | Creates a pre-signed URL and initializes the job record |
+| AWS Lambda — Upload URL | Creates a short-lived pre-signed upload URL |
 | Amazon S3 — Source bucket | Stores original uploads; emits object-created events |
 | Amazon SQS — Processing queue | Buffers jobs and enables asynchronous consumption |
 | AWS Lambda — Queue processor | Reads SQS messages and starts Step Functions executions |
@@ -71,7 +71,7 @@ The queue acts as a buffer. Upload speed and processing speed can vary independe
 
 ## Reliability and Failure Handling
 
-- **SQS retries and DLQ:** failed message processing can be retried and then moved to a dead-letter queue after the configured receive-count threshold.
+- **SQS retries and DLQ:** failed queue-processor invocations can be retried and then moved to a dead-letter queue after the configured receive-count threshold. The S3 bucket and SQS queue must be in the same Region, and the queue policy must allow the source bucket to send notifications.
 - **Workflow retries and Catch:** Step Functions should retry transient task failures and use a Catch path for terminal failures. The failure path marks the DynamoDB job as `FAILED` and publishes an SNS alert.
 - **Important distinction:** the SQS DLQ does **not** automatically capture a later Step Functions task failure after the queue processor successfully starts the workflow and returns successfully. That is why workflow-level retries and a separate Catch/failure path are shown.
 - **Idempotency:** S3 notifications and SQS messages may be delivered more than once. Processing should safely handle duplicate events (for example, by using a stable job ID/object key and conditional status transitions).
