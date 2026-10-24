@@ -260,8 +260,8 @@ CloudFormation-generated ARNs are wired into the template automatically; you do 
 Replace the endpoint with your `UploadUrlEndpoint` output:
 
 ```bash
-curl -X POST "YOUR_UPLOAD_URL_ENDPOINT" \\
-  -H "Content-Type: application/json" \\
+curl -X POST "YOUR_UPLOAD_URL_ENDPOINT" \
+  -H "Content-Type: application/json" \
   -d '{"original_filename":"sample.jpg","content_type":"image/jpeg"}'
 ```
 
@@ -272,8 +272,8 @@ The response contains `upload_url` and `image_id`.
 Save the response as `response.json` and use a local JPEG file named `sample.jpg`:
 
 ```bash
-curl -X PUT "$(jq -r .upload_url response.json)" \\
-  -H "Content-Type: image/jpeg" \\
+curl -X PUT "$(jq -r .upload_url response.json)" \
+  -H "Content-Type: image/jpeg" \
   --data-binary "@sample.jpg"
 ```
 
@@ -368,7 +368,7 @@ Install the test dependency and run the unit tests:
 ```bash
 python -m venv .venv
 # Windows PowerShell:
-.venv\\Scripts\\Activate.ps1
+.venv\Scripts\Activate.ps1
 # macOS/Linux:
 # source .venv/bin/activate
 pip install -r requirements-dev.txt
