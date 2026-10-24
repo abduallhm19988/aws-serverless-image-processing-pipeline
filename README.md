@@ -1,15 +1,6 @@
 # Serverless Image Processing Pipeline
 
-> **Event-driven, resilient, serverless image-processing architecture built with AWS managed services.**
 
-![AWS](https://img.shields.io/badge/AWS-Cloud-orange)
-![Architecture](https://img.shields.io/badge/Architecture-Serverless-blue)
-![Amazon S3](https://img.shields.io/badge/Amazon%20S3-Storage-green)
-![AWS Lambda](https://img.shields.io/badge/AWS%20Lambda-Compute-purple)
-![Amazon SQS](https://img.shields.io/badge/Amazon%20SQS-Messaging-red)
-![Step Functions](https://img.shields.io/badge/Step%20Functions-Orchestration-blue)
-
----
 
 ## Overview
 
