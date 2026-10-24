@@ -1,0 +1,10 @@
+# Copy this file to samconfig.toml and replace the example values.
+# Do not commit account-specific or sensitive configuration.
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "image-processing-dev"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+parameter_overrides = "SourceBucketName=replace-with-globally-unique-source-name DestinationBucketName=replace-with-globally-unique-destination-name StageName=dev AllowedOrigin=*"

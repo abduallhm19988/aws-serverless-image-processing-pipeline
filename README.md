@@ -1,562 +1,404 @@
 # Serverless Image Processing Pipeline
 
+![AWS](https://img.shields.io/badge/AWS-Cloud-orange)
+![Architecture](https://img.shields.io/badge/Architecture-Event--Driven-blue)
+![Compute](https://img.shields.io/badge/Compute-Serverless-success)
+![Infrastructure](https://img.shields.io/badge/Infrastructure-AWS%20SAM-purple)
+![Status](https://img.shields.io/badge/Status-Implementation%20Starter-informational)
 
+An event-driven serverless image-processing project built with AWS managed services. It separates upload requests, message buffering, workflow orchestration, image transformation, metadata storage, notifications, and private global delivery.
+
+## Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [How the workflow works](#how-the-workflow-works)
+- [Repository structure](#repository-structure)
+- [Configuration without hard-coded account details](#configuration-without-hard-coded-account-details)
+- [Deploy the infrastructure](#deploy-the-infrastructure)
+- [Test the pipeline](#test-the-pipeline)
+- [Code walkthrough](#code-walkthrough)
+- [Reliability and error handling](#reliability-and-error-handling)
+- [Security](#security)
+- [Monitoring and cost](#monitoring-and-cost)
+- [Clean up](#clean-up)
+- [Testing locally](#testing-locally)
+- [Limitations and next steps](#limitations-and-next-steps)
+- [AWS documentation](#aws-documentation)
 
 ## Overview
 
-This project describes a serverless image-processing pipeline on AWS.
+A client asks Amazon API Gateway for a temporary Amazon S3 pre-signed URL. The Upload URL Lambda creates a unique object key and a URL that permits an upload to the private source bucket. The client then uploads the image **directly to S3**—the image bytes do not pass through API Gateway or Lambda.
 
-A client requests a temporary **S3 pre-signed URL** through Amazon API Gateway and AWS Lambda, then uploads the original image directly to a private Amazon S3 source bucket. S3 sends an object-created event to an Amazon SQS processing queue, which buffers work and separates uploads from processing.
+An S3 `ObjectCreated` event is sent to an SQS processing queue. The Queue Processor Lambda consumes the message and starts an AWS Step Functions execution. The workflow runs the image-processing Lambda, stores the resized result in a separate private S3 bucket, updates DynamoDB metadata, and publishes a success notification through SNS. If a workflow task fails, a failure handler records the failed status and publishes a failure notification.
 
-A queue-processing Lambda starts an AWS Step Functions workflow. The workflow validates the image, resizes it, applies a watermark, stores the processed image in a separate S3 destination bucket, updates metadata in Amazon DynamoDB, and sends a notification through Amazon SNS. Amazon CloudFront delivers processed images to viewers.
+CloudFront uses Origin Access Control (OAC) to deliver processed images without making the destination bucket public. Amazon CloudWatch collects logs and service metrics.
 
-The architecture also includes an SQS Dead-Letter Queue (DLQ) for messages that repeatedly fail in the queue-processing path, plus CloudWatch for logs, metrics, and alarms.
-
----
+**Scope:** the repository includes application source files and an AWS SAM template intended to deploy the demonstrated architecture. You still need to configure unique S3 bucket names, deploy it in your account, verify the generated resources, and run the tests below. A checked-in template is not proof that a live stack has already been deployed or tested.
 
 ## Architecture
 
-![Serverless Image Processing Pipeline Architecture](./architecture-diagram.png)
+The diagram is stored in the `architecture/` directory and embedded directly below.
 
-### Architecture Flow
+![Serverless Image Processing Pipeline Architecture](./architecture/architecture-diagram.png)
+
+### End-to-end flow
 
 ```text
 Client
-  |
-  | Request upload URL
+  |  POST /upload-url
   v
-API Gateway
-  |
+API Gateway -> Upload URL Lambda -> DynamoDB (UPLOAD_URL_ISSUED)
+  |                                   |
+  | returns a pre-signed URL           +--> presigned PUT URL for source S3
   v
-Upload URL Lambda
-  |
-  | Return pre-signed URL through API Gateway
-  v
-Client
-  |
-  | PUT image using the pre-signed URL
-  v
-S3 Source Bucket
-  |
-  | ObjectCreated event
-  v
-SQS Processing Queue
-  |
-  v
-Lambda Queue Processor
-  |
-  | Start workflow
-  v
-Step Functions
-  |
-  +--> Validate Image
-  |
-  +--> Resize Image
-  |
-  +--> Apply Watermark
-  |
-  +--> Store Processed Image --> S3 Destination Bucket --> CloudFront --> Viewer
-  |
-  +--> Update Metadata -------> DynamoDB
-  |
-  +--> Publish Notification --> SNS
+Client -- PUT image directly --> Private S3 Source Bucket
+                                      |
+                                      | ObjectCreated event, prefix incoming/
+                                      v
+                                SQS Processing Queue ----> SQS DLQ
+                                      |
+                                      v
+                                Queue Processor Lambda
+                                      |
+                                      | StartExecution (stable name)
+                                      v
+                                AWS Step Functions
+                                      |
+                                      v
+                                Image Processing Lambda
+                                  |      |       |
+                                  |      |       +--> DynamoDB: COMPLETED
+                                  |      +----------> S3 Destination: processed/
+                                  |
+                                  +--> validate and resize with Pillow
 
-Queue message repeatedly fails
-  |
-  v
-SQS Dead-Letter Queue (DLQ)
+Step Functions success -> SNS success notification
+Step Functions failure -> Failure Handler Lambda -> DynamoDB: FAILED + SNS notification
+
+Viewer -> CloudFront -> OAC-authorized private S3 Destination Bucket
+Logs and metrics -> CloudWatch
+Permissions -> IAM roles and resource policies
 ```
 
-> **Upload-flow detail:** Lambda generates the pre-signed URL; the client uses that URL to upload the image directly to S3. The image bytes do not travel through API Gateway or the upload-URL Lambda.
+### Important architecture distinctions
 
----
+- **Pre-signed URL:** grants temporary access to one intended S3 operation. The image bytes travel from the client directly to S3.
+- **SQS:** buffers object-created events and separates upload volume from processing capacity.
+- **Queue Processor Lambda:** consumes SQS messages and starts workflows; it does not resize images.
+- **Step Functions:** orchestrates the steps; it is not itself an image-processing engine.
+- **Image Processing Lambda:** validates the downloaded image, resizes it with Pillow, stores the processed object, and updates job metadata.
+- **SQS DLQ versus workflow failure:** the DLQ captures messages that repeatedly fail in the SQS consumer path. If the Queue Processor starts Step Functions successfully and acknowledges the message, a later workflow task failure is handled by Step Functions Retry/Catch and the failure handler—not automatically by that SQS DLQ.
+- **CloudFront OAC:** allows CloudFront to access the destination bucket while keeping direct public bucket access blocked.
 
-## Why This Architecture?
+## How the workflow works
 
-A synchronous application may keep a client waiting while an image is processed, and it can struggle when many uploads arrive at once.
+### 1. Request an upload URL
 
-This architecture separates **uploading** from **processing**:
+Send a JSON body to the API endpoint with the original filename and media type:
 
-```text
-Upload traffic
-     |
-     v
-Source S3
-     |
-     v
-SQS buffer
-     |
-     v
-Queue Processor Lambda
-     |
-     v
-Step Functions workflow
-     |
-     v
-Processed image + metadata + notification
-```
-
-Amazon SQS buffers incoming work so upload traffic and processing throughput can vary independently.
-
-Benefits include:
-
-- Loose coupling between upload and processing
-- Asynchronous processing
-- Buffering during traffic spikes
-- Retry support and failure isolation
-- Independent scaling of managed services
-- Reduced time spent waiting for an upload API response
-- Separate storage and access policies for original and processed images
-
----
-
-## End-to-End Workflow
-
-### 1. Request an Upload URL
-
-The client sends a request to an Amazon API Gateway endpoint. The upload-URL Lambda creates a short-lived pre-signed URL for a specific object key and returns it through API Gateway.
-
-**Why use a pre-signed URL?**
-
-- The S3 bucket can remain private.
-- The URL grants temporary, scoped access.
-- The image bytes do not pass through API Gateway or Lambda.
-- Upload handling is separated from image processing.
-
-### 2. Upload the Image to Source S3
-
-The client uses the pre-signed URL to upload the image directly to the source bucket.
-
-Example object layout:
-
-```text
-source-bucket/
-└── incoming/
-    ├── image-001.jpg
-    ├── image-002.png
-    └── image-003.jpg
-```
-
-The source bucket should have S3 Block Public Access enabled.
-
-### 3. S3 Event → SQS
-
-After an object is created, S3 sends an event notification to the processing queue. SQS provides a durable buffer between uploads and the processing layer.
-
-The source bucket and queue must be configured in a compatible Region, and the queue policy must permit the S3 bucket to send messages.
-
-### 4. SQS → Queue Processor Lambda
-
-Lambda consumes messages from SQS through an event source mapping. It extracts the source bucket and object key and starts a Step Functions execution.
-
-This component handles queue messages and starts workflows; it is separate from the image-processing workflow itself.
-
-### 5. Step Functions Image-Processing Workflow
-
-Step Functions coordinates the processing stages:
-
-1. **Validate image** — check allowed file types, size limits, and whether the image can be decoded safely.
-2. **Resize image** — create the required output dimensions.
-3. **Apply watermark** — add the configured watermark.
-4. **Store processed image** — write the output to the destination S3 bucket.
-5. **Update metadata** — record the output key and final processing status in DynamoDB.
-6. **Notify subscribers** — publish a success or failure notification through SNS as appropriate.
-
-The individual tasks can be implemented with Lambda functions or supported service integrations, depending on the final implementation.
-
-### 6. Deliver the Processed Image
-
-CloudFront serves the processed object from the destination S3 bucket. Configure Origin Access Control (OAC) and an appropriate bucket policy so users access the content through the distribution rather than by making the bucket public.
-
----
-
-## AWS Services
-
-| AWS service | Responsibility |
-|---|---|
-| **Amazon API Gateway** | Exposes the endpoint used to request an upload URL |
-| **AWS Lambda — Upload URL** | Creates a short-lived S3 pre-signed URL |
-| **Amazon S3 — Source bucket** | Stores original images and emits object-created events |
-| **Amazon SQS — Processing queue** | Buffers upload events and decouples processing |
-| **AWS Lambda — Queue processor** | Consumes SQS messages and starts Step Functions executions |
-| **AWS Step Functions** | Orchestrates validation, resize, watermark, storage, metadata, and error paths |
-| **Amazon S3 — Destination bucket** | Stores processed images separately from originals |
-| **Amazon DynamoDB** | Stores job metadata, object keys, and processing status |
-| **Amazon SNS** | Publishes processing notifications to configured subscribers |
-| **Amazon CloudFront** | Caches and delivers processed images globally |
-| **Amazon SQS — DLQ** | Isolates queue messages that repeatedly fail processing |
-| **Amazon CloudWatch** | Collects logs and metrics and supports alarms |
-| **AWS IAM** | Controls access through least-privilege roles and policies |
-
----
-
-## Implementation Examples
-
-The following snippets explain how the main pieces can be implemented. They are templates: resource names, IAM permissions, payload shape, retry configuration, and environment variables must match the actual deployment. The presence of code examples in this README does not by itself mean that the full system is deployed.
-
-### Image-processing Lambda (Python, Boto3, Pillow)
-
-Configure these Lambda environment variables instead of hard-coding account-specific values:
-
-- \`DEST_BUCKET\`: name of the destination S3 bucket.
-- \`TABLE_NAME\`: DynamoDB metadata table name.
-
-Package Pillow in the deployment artifact or a compatible Lambda layer. The execution role needs permission to read the source object, write the processed destination object, and update the relevant DynamoDB item.
-
-\`\`\`python
-import io
-import os
-from pathlib import PurePosixPath
-
-import boto3
-from PIL import Image, UnidentifiedImageError
-
-s3 = boto3.client("s3")
-dynamodb = boto3.resource("dynamodb")
-
-DEST_BUCKET = os.environ["DEST_BUCKET"]
-TABLE_NAME = os.environ["TABLE_NAME"]
-table = dynamodb.Table(TABLE_NAME)
-
-
-def lambda_handler(event, context):
-    # Expected Step Functions input: {"bucket": "...", "key": "..."}
-    payload = event.get("Payload", event)
-    bucket = payload.get("bucket")
-    key = payload.get("key")
-
-    if not bucket or not key:
-        raise ValueError("Input must contain 'bucket' and 'key'.")
-
-    # Use only the filename locally; the S3 key remains the object identifier.
-    filename = PurePosixPath(key).name
-    if not filename:
-        raise ValueError("Invalid source object key.")
-
-    download_path = f"/tmp/{filename}"
-
-    try:
-        # 1. Download the original image from source S3.
-        s3.download_file(bucket, key, download_path)
-
-        # 2. Resize while preserving the aspect ratio.
-        with Image.open(download_path) as image:
-            image.thumbnail((800, 800))
-            image_format = (image.format or "JPEG").upper()
-
-            if image_format not in {"JPEG", "PNG", "WEBP"}:
-                image_format = "JPEG"
-
-            if image_format == "JPEG" and image.mode not in {"RGB", "L"}:
-                image = image.convert("RGB")
-
-            output = io.BytesIO()
-            image.save(output, format=image_format)
-            output.seek(0)
-
-        # 3. Store the result in the separate destination bucket.
-        extension = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}[image_format]
-        dest_key = f"processed/{PurePosixPath(key).stem}-processed.{extension}"
-        content_type = {
-            "JPEG": "image/jpeg",
-            "PNG": "image/png",
-            "WEBP": "image/webp",
-        }[image_format]
-
-        s3.put_object(
-            Bucket=DEST_BUCKET,
-            Key=dest_key,
-            Body=output.getvalue(),
-            ContentType=content_type,
-        )
-
-        # 4. Update metadata. ImageId must match your table's actual partition key.
-        table.update_item(
-            Key={"ImageId": key},
-            UpdateExpression="SET #status = :completed, ProcessedKey = :processed_key",
-            ExpressionAttributeNames={"#status": "Status"},
-            ExpressionAttributeValues={
-                ":completed": "COMPLETED",
-                ":processed_key": dest_key,
-            },
-        )
-
-        return {
-            "status": "COMPLETED",
-            "sourceBucket": bucket,
-            "sourceKey": key,
-            "destinationBucket": DEST_BUCKET,
-            "processedKey": dest_key,
-        }
-
-    except (UnidentifiedImageError, OSError) as exc:
-        # Step Functions should catch this error and run the failure path.
-        raise ValueError(f"Unsupported or unreadable image: {key}") from exc
-\`\`\`
-
-**Important implementation notes**
-
-- The Queue Processor must translate the S3 event record into the workflow input shape \`{"bucket": "...", "key": "..."}\`.
-- The DynamoDB table's primary key must match the code. Adjust \`ImageId\` and the update expression to your schema.
-- Add explicit maximum file size, allowed formats, safe image decoding, memory/timeout settings, and idempotency before production use.
-- The example resizes images; watermarking is a separate processing step that must be implemented if required.
-- Treat the uploaded file as untrusted input. A filename extension or content-type header alone does not prove that a file is a valid image.
-
-### Step Functions state-machine example (ASL)
-
-This simplified example invokes the processing Lambda and then publishes a success notification. Replace the placeholder strings during deployment, and add a real failure handler that updates DynamoDB and optionally publishes a failure notification.
-
-\`\`\`json
+```json
 {
-  "Comment": "Serverless image processing workflow",
-  "StartAt": "ProcessImage",
-  "States": {
-    "ProcessImage": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "REPLACE_WITH_PROCESS_IMAGE_FUNCTION_ARN",
-        "Payload.$": "$"
-      },
-      "OutputPath": "$.Payload",
-      "Retry": [
-        {
-          "ErrorEquals": [
-            "Lambda.ServiceException",
-            "Lambda.AWSLambdaException",
-            "Lambda.SdkClientException"
-          ],
-          "IntervalSeconds": 2,
-          "BackoffRate": 2,
-          "MaxAttempts": 3
-        }
-      ],
-      "Catch": [
-        {
-          "ErrorEquals": ["States.ALL"],
-          "ResultPath": "$.error",
-          "Next": "ProcessingFailed"
-        }
-      ],
-      "Next": "SendSuccessNotification"
-    },
-    "SendSuccessNotification": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::sns:publish",
-      "Parameters": {
-        "TopicArn": "REPLACE_WITH_SNS_TOPIC_ARN",
-        "Message.$": "States.JsonToString($)"
-      },
-      "End": true
-    },
-    "ProcessingFailed": {
-      "Type": "Fail",
-      "Error": "ImageProcessingFailed",
-      "Cause": "Processing failed; configure a failure handler to update metadata and notify subscribers."
-    }
-  }
+  "original_filename": "holiday-photo.jpg",
+  "content_type": "image/jpeg"
 }
-\`\`\`
+```
 
-This is a teaching template, not a drop-in production definition. Validate the Amazon States Language definition and use real ARNs and least-privilege execution-role permissions. A production Catch path should update the DynamoDB status to \`FAILED\` and can publish an SNS failure notification before ending.
+The API returns an `image_id`, a temporary `upload_url`, the required `Content-Type` header, and the URL expiry. The service accepts JPEG, PNG, and WEBP media types in this starter implementation.
 
-## Reliability and Failure Handling
+### 2. Upload directly to S3
 
-### SQS retries and Dead-Letter Queue
+Use HTTP `PUT` to the returned URL, including the exact `Content-Type` header returned by the API. The source bucket remains private. The key is generated server-side under `incoming/`, rather than trusting a user-supplied path.
 
-If the queue-processing Lambda repeatedly fails to process a message, SQS can move the message to a configured DLQ after the redrive policy's receive-count threshold is reached.
+The configured maximum image size is checked by the processing Lambda before it downloads the object. **A pre-signed PUT URL does not impose a maximum-size range by itself**, so an oversized file may reach S3 before processing rejects it. For strict upload-time size enforcement, consider a pre-signed POST policy with a `content-length-range` condition or a separate upload control.
 
-### Step Functions retries and Catch
+### 3. S3 sends the event to SQS
 
-Failures that happen **inside the Step Functions workflow** need workflow-level error handling. Configure Retry for transient errors and Catch paths for terminal failures. A failure path should update the DynamoDB job status to `FAILED` and publish an SNS notification when appropriate.
+The bucket notification watches object-created events under `incoming/`. The SQS queue buffers messages and uses a redrive policy to move messages to the DLQ after repeated queue-consumer failures.
 
-> **Important distinction:** the SQS DLQ does not automatically capture a later Step Functions task failure if the queue-processing Lambda already started the workflow successfully and acknowledged the SQS message. These are separate failure paths.
+### 4. Queue Processor starts Step Functions
 
-### Idempotency
+The Queue Processor parses the S3 event, URL-decodes the object key, and builds a workflow input containing `bucket`, `key`, and `imageId`. It generates a stable Step Functions execution name from the bucket and key to reduce duplicate executions when S3/SQS redelivers the same event.
 
-S3 notifications and SQS messages can be delivered more than once. Processing should be designed to handle duplicate events safely, for example by using a stable job identifier and conditional state updates.
+### 5. Process, store, and update metadata
 
-### Avoid event loops
+The image-processing Lambda checks the source bucket and object prefix, checks the object size, downloads the original image into the Lambda temporary directory, validates that Pillow can decode an allowed image format, resizes it while preserving aspect ratio, uploads the result to `processed/` in the destination bucket, and updates DynamoDB.
 
-Keep original and processed images in separate buckets, or scope S3 notifications to the source prefix, so storing an output does not trigger another processing run.
+Example metadata item:
 
----
+```json
+{
+  "ImageId": "incoming/unique-object-key.jpg",
+  "OriginalFilename": "holiday-photo.jpg",
+  "ContentType": "image/jpeg",
+  "Status": "COMPLETED",
+  "ProcessedKey": "processed/unique-object-key-processed.jpg",
+  "ProcessedBucket": "value-from-deployment-configuration",
+  "ProcessedContentType": "image/jpeg",
+  "CreatedAt": "ISO-8601 timestamp",
+  "UpdatedAt": "ISO-8601 timestamp"
+}
+```
+
+Status values used by the application include `UPLOAD_URL_ISSUED`, `PROCESSING`, `COMPLETED`, and `FAILED`.
+
+### 6. Notify and deliver
+
+After successful processing, Step Functions publishes a success message to SNS. If processing fails, the workflow invokes the Failure Handler Lambda, which updates DynamoDB to `FAILED` and publishes a failure notification. If you provide an email subscription during deployment, SNS sends a subscription confirmation email; confirm the subscription before expecting email notifications.
+
+CloudFront delivers objects from the private destination bucket through OAC. A viewer URL is composed from the deployed CloudFront domain and the processed object key, for example `https://CLOUDFRONT_DOMAIN/processed/OBJECT_KEY.jpg`. Replace the example placeholders with the outputs from your stack.
+
+## Repository structure
+
+```text
+aws-serverless-image-processing-pipeline/
+├── README.md
+├── LICENSE
+├── template.yaml
+├── samconfig.toml.example
+├── requirements-dev.txt
+├── architecture/
+│   └── architecture-diagram.png
+├── statemachine/
+│   └── image-processing.asl.json
+├── src/
+│   ├── upload_url/
+│   │   └── app.py
+│   ├── queue_processor/
+│   │   └── app.py
+│   ├── process_image/
+│   │   ├── app.py
+│   │   └── requirements.txt
+│   └── failure_handler/
+│       └── app.py
+├── tests/
+│   └── test_helpers.py
+└── screenshots/
+    └── README.md
+```
+
+Each Lambda has its own folder and handler. The infrastructure, Step Functions definition, tests, architecture image, and deployment example are stored separately so you can maintain and explain them independently.
+
+## Configuration without hard-coded account details
+
+No account ID, fixed Lambda ARN, or personal bucket name should be embedded in the Python handlers.
+
+| Setting | Where it comes from | Why |
+|---|---|---|
+| AWS Region and account | Current deployment / CloudFormation | The same template can be deployed to different accounts and Regions |
+| Source S3 bucket name | `SourceBucketName` parameter | S3 bucket names must be globally unique |
+| Destination S3 bucket name | `DestinationBucketName` parameter | Keeps processed files isolated and private |
+| DynamoDB table name | `!Ref ImageMetadataTable` | CloudFormation provides the generated resource name |
+| Step Functions ARN | `!Ref ImageProcessingStateMachine` | The Queue Processor receives the deployed state-machine ARN as an environment variable |
+| Lambda and SNS ARNs | `DefinitionSubstitutions` and CloudFormation references | Step Functions uses resource ARNs generated by the same deployment |
+| URL expiry | `UploadUrlExpirationSeconds` parameter | Can be tuned without editing application code |
+| Maximum image size and dimensions | `MaxImageBytes` and `MaxImageDimension` parameters | Lets the deployment adjust processing limits |
+| Browser origin | `AllowedOrigin` parameter | Configure the actual frontend domain instead of leaving a wildcard in production |
+| Optional email | `NotificationEmail` parameter | Can enable one email subscription without editing the template |
+
+The value from an example like `my-destination-images-bucket-859816906510-us-east-1-an` must **not** be copied as-is. It includes an account-specific-looking suffix and may not exist in your account. Supply your own globally unique lowercase bucket names during deployment. Do not hard-code account IDs or Region strings into handlers.
+
+## Deploy the infrastructure
+
+### Prerequisites
+
+Install and configure:
+
+- AWS CLI with credentials for the target account.
+- AWS SAM CLI.
+- Python 3.12.
+- A deployment role/user allowed to create the resources in `template.yaml`.
+
+Review the current AWS service pricing before deploying. This template creates a CloudFront distribution and enables DynamoDB point-in-time recovery, in addition to the Lambda, S3, SQS, Step Functions, SNS, API Gateway, and CloudWatch resources.
+
+### 1. Validate and build
+
+From the repository root:
+
+```bash
+sam validate --lint
+sam build
+```
+
+The SAM build packages the Pillow dependency from `src/process_image/requirements.txt`.
+
+### 2. Deploy
+
+Run:
+
+```bash
+sam deploy --guided
+```
+
+Use a lowercase stack name and provide two different, globally unique bucket names when prompted:
+
+- `SourceBucketName`: private source bucket for uploaded originals.
+- `DestinationBucketName`: private destination bucket for processed images.
+
+Set `AllowedOrigin` to the real frontend origin if there is one. For a learning test without a browser frontend, `*` can be used temporarily, but it is not the recommended production configuration. Set `NotificationEmail` to an email address to create an optional SNS subscription, or leave it blank.
+
+You can also copy `samconfig.toml.example` to `samconfig.toml`, replace the example values, and run `sam deploy`. Do not commit your personal deployment configuration if it contains account-specific information.
+
+### 3. Save the stack outputs
+
+After deployment, capture the outputs printed by CloudFormation. The main ones are:
+
+- `UploadUrlEndpoint`
+- `SourceBucketName`
+- `DestinationBucketName`
+- `ImageMetadataTableName`
+- `NotificationTopicArn`
+- `CloudFrontDomainName`
+- Queue and DLQ URLs
+
+CloudFormation-generated ARNs are wired into the template automatically; you do not need to paste them into the source files.
+
+## Test the pipeline
+
+### 1. Request a pre-signed URL
+
+Replace the endpoint with your `UploadUrlEndpoint` output:
+
+```bash
+curl -X POST "YOUR_UPLOAD_URL_ENDPOINT" \\
+  -H "Content-Type: application/json" \\
+  -d '{"original_filename":"sample.jpg","content_type":"image/jpeg"}'
+```
+
+The response contains `upload_url` and `image_id`.
+
+### 2. Upload an image
+
+Save the response as `response.json` and use a local JPEG file named `sample.jpg`:
+
+```bash
+curl -X PUT "$(jq -r .upload_url response.json)" \\
+  -H "Content-Type: image/jpeg" \\
+  --data-binary "@sample.jpg"
+```
+
+The `Content-Type` must match the value used to sign the URL. Do not share the returned pre-signed URL; it grants temporary upload access.
+
+### 3. Verify the result
+
+In the AWS console or using the AWS CLI:
+
+- Confirm the original appears under `incoming/` in the source bucket.
+- Confirm the processing queue receives the event.
+- Open Step Functions and check the execution status.
+- Confirm a processed object appears under `processed/` in the destination bucket.
+- Check the DynamoDB item for `COMPLETED` or `FAILED`.
+- Check the SNS topic/subscription for the notification.
+- Open the processed object through the CloudFront domain.
+
+### Validation checklist
+
+- [ ] API returns a pre-signed URL for an allowed media type.
+- [ ] The upload succeeds when the required `Content-Type` is included.
+- [ ] An S3 event is delivered to SQS.
+- [ ] The Queue Processor starts the state-machine execution.
+- [ ] The processing Lambda validates and resizes the image.
+- [ ] The processed file is stored in the destination bucket.
+- [ ] DynamoDB records the output key and final status.
+- [ ] SNS publishes the success or failure message.
+- [ ] CloudFront can read the processed object without making the destination bucket public.
+- [ ] Repeated queue messages do not start duplicate concurrent executions.
+- [ ] A deliberately invalid/unsupported image follows the state-machine failure path.
+
+## Code walkthrough
+
+| File | Responsibility |
+|---|---|
+| `src/upload_url/app.py` | Validates the upload request, creates a unique incoming key, writes the initial DynamoDB item, and generates a short-lived S3 pre-signed URL |
+| `src/queue_processor/app.py` | Parses S3 event messages arriving through SQS and starts a stable-named Step Functions execution |
+| `src/process_image/app.py` | Checks size and input location, decodes and resizes the image using Pillow, uploads the output, and updates DynamoDB |
+| `src/failure_handler/app.py` | Marks the job as failed and publishes a failure notification |
+| `statemachine/image-processing.asl.json` | Defines processing, retries, success notification, and the workflow failure path |
+| `template.yaml` | Creates the S3 buckets, queue/DLQ, IAM permissions, Lambda functions, state machine, table, topic, API Gateway, and CloudFront distribution |
+| `tests/test_helpers.py` | Tests request validation, S3 event parsing, and stable workflow execution-name behavior |
+| `architecture/architecture-diagram.png` | Visual overview of the end-to-end design |
+
+## Reliability and error handling
+
+### Queue failures
+
+If the Queue Processor cannot start a workflow or parse a message, it reports that SQS item as failed. SQS can retry it and eventually move it to the configured DLQ according to the redrive policy. Batch size is set to one to keep the failure boundary simple for this learning project.
+
+### Workflow failures
+
+When the processing Lambda fails, Step Functions retries selected transient errors. Its Catch path invokes the Failure Handler, which updates the job status and publishes an SNS failure message. This is separate from the SQS DLQ because the message may already have been acknowledged after the workflow started.
+
+### Duplicate events
+
+S3 notifications and SQS use at-least-once delivery. The Queue Processor derives the execution name deterministically from the source bucket and key and treats `ExecutionAlreadyExists` as a duplicate event. A new upload receives a new random key. For a more advanced production system, add explicit conditional state transitions and define a controlled reprocessing strategy for previously failed keys.
 
 ## Security
 
-### Amazon S3
+- Both S3 buckets have Block Public Access enabled and server-side encryption.
+- The destination bucket policy allows read access only to the configured CloudFront distribution through OAC.
+- Each Lambda function has a dedicated IAM role with only its required S3, DynamoDB, SQS, Step Functions, or SNS actions.
+- Pre-signed URLs have a short configurable expiry and are scoped to a unique key and content type.
+- The source event notification only watches the `incoming/` prefix, and the processor rejects objects outside that prefix.
+- Uploaded content is untrusted; the processor validates the actual file format using Pillow and checks object size.
+- The API demo does not include user authentication or rate limiting. For a public production endpoint, add authentication (for example, Amazon Cognito or a suitable authorizer), request throttling, abuse protection, and an explicit maximum upload policy.
+- Never commit AWS credentials, real secrets, unredacted logs, or full pre-signed URLs.
 
-- Keep source and destination buckets private.
-- Enable S3 Block Public Access.
-- Use pre-signed URLs with short expiration and only the required upload permissions.
-- Use CloudFront OAC and a restrictive bucket policy for the destination bucket.
-- Enable encryption at rest and apply lifecycle policies where appropriate.
+## Monitoring and cost
 
-### AWS IAM
+Use CloudWatch metrics and logs to investigate Lambda errors/duration, SQS queue depth and age, DLQ messages, failed Step Functions executions, and CloudFront request/error behavior. Consider adding alarms for sustained failures, old messages, and any non-empty DLQ.
 
-Use separate, least-privilege roles for each component. For example:
+This design is serverless, not automatically free. Requests and usage may incur charges for API Gateway, Lambda, Step Functions state transitions, SQS, S3 storage/requests, DynamoDB, SNS, CloudWatch logs, and CloudFront data transfer. DynamoDB point-in-time recovery is enabled in the template and can also incur charges. Check current pricing before deploying and use a small test workload.
 
-```text
-Upload URL Lambda
-  └── Permission to generate the intended pre-signed upload request
+## Clean up
 
-Queue Processor Lambda
-  ├── Receive/delete messages from the processing queue
-  └── Start the required Step Functions execution
+S3 buckets generally cannot be deleted while they contain objects. Before deleting the stack, remove test objects from both buckets using the bucket names from the CloudFormation outputs:
 
-Workflow tasks
-  ├── Read the required source object
-  ├── Write the processed destination object
-  ├── Update the required DynamoDB record
-  └── Publish to the configured SNS topic
+```bash
+aws s3 rm "s3://YOUR_SOURCE_BUCKET_NAME" --recursive
+aws s3 rm "s3://YOUR_DESTINATION_BUCKET_NAME" --recursive
+sam delete --stack-name YOUR_STACK_NAME
 ```
 
-Validate file type and size, and safely decode untrusted image files before processing them.
+Replace the placeholders with your own output values. Review the resources in the stack before deletion, especially if you reused any bucket or table outside this project.
 
----
+## Testing locally
 
-## Scalability
+Install the test dependency and run the unit tests:
 
-The upload path and processing path scale independently:
-
-```text
-Client uploads
-      |
-      v
-Source S3
-      |
-      v
-SQS queue  <--- buffers bursts
-      |
-      v
-Lambda consumers
-      |
-      v
-Step Functions
-      |
-      v
-Processed output
+```bash
+python -m venv .venv
+# Windows PowerShell:
+.venv\\Scripts\\Activate.ps1
+# macOS/Linux:
+# source .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest -q
 ```
 
-SQS helps absorb bursts, while Lambda and other managed services can scale with demand. Concurrency limits and queue batch settings should be chosen based on workload, downstream limits, and cost.
+The tests use dummy AWS credentials to avoid accessing your account. They exercise pure validation/parsing helpers; they do not replace an integration test against a deployed AWS stack.
 
----
+## Limitations and next steps
 
-## Observability
+- Upload size is checked by the processor after the S3 upload. Use a pre-signed POST policy or another upload control if S3 must reject oversized files before storing them.
+- The demo endpoint has no user authentication, request authorization, or application-level rate limiting.
+- Image transformation currently resizes images; it does not apply a watermark.
+- CloudWatch alarms and dashboards can be added for production operations.
+- Add CI/CD and automated integration tests before using the pipeline for a real workload.
+- Consider lifecycle policies for original uploads and processed objects based on retention needs.
 
-Use Amazon CloudWatch to monitor errors, latency, and workload health.
+## AWS documentation
 
-| Component | Useful signals |
-|---|---|
-| Lambda | Invocations, errors, duration, throttles, concurrency |
-| SQS | Visible messages, oldest-message age, messages sent/received, DLQ depth |
-| Step Functions | Successful/failed executions and execution duration |
-| DynamoDB | Throttling and read/write activity |
-| CloudFront | Request volume, cache behavior, and delivery errors |
-
-Configure alarms for sustained errors, growing queue age, DLQ messages, and failed workflow executions.
-
----
-
-## Testing Checklist
-
-### Successful processing
-
-- [ ] API Gateway returns a valid pre-signed URL.
-- [ ] The client uploads an image to the source bucket.
-- [ ] S3 sends the expected event to SQS.
-- [ ] The queue processor receives the message.
-- [ ] A Step Functions execution starts.
-- [ ] Validation and image transformations complete.
-- [ ] The processed image is stored in the destination bucket.
-- [ ] DynamoDB records the final status and processed object key.
-- [ ] SNS publishes the configured notification.
-- [ ] CloudFront can deliver the processed image.
-
-### Failure handling
-
-- [ ] An unsupported or invalid image follows the workflow failure path.
-- [ ] Transient workflow errors use configured retries.
-- [ ] Terminal workflow failures update status and can trigger an SNS alert.
-- [ ] Repeated queue-processing failures reach the SQS DLQ.
-- [ ] Duplicate events do not create inconsistent job state.
-- [ ] Uploading a processed object does not start an unintended processing loop.
-
----
-
-## Screenshots
-
-Use screenshots as evidence of what has actually been configured or tested. Add the corresponding image files under \`screenshots/\` and update the names below to match the repository. Do not claim a screenshot proves successful end-to-end processing unless it shows that result.
-
-- **S3 Event Notification:** source S3 bucket notification targeting the SQS processing queue.
-- **SQS and DLQ:** queue redrive policy and dead-letter queue configuration.
-- **Step Functions Workflow:** state-machine graph or a successful/failed execution.
-- **Successful Processing:** processed output in destination S3 and its metadata status.
-
-## Project Structure
-
-The architecture PNG is currently at the repository root, so the Architecture section references it as \`./architecture-diagram.png\`.
-
-\`\`\`text
-aws-serverless-image-processing-pipeline/
-├── README.md
-├── architecture-diagram.png
-├── architecture-diagram.svg
-└── screenshots/
-    └── (implementation screenshots, if added)
-\`\`\`
-
-## Cost Considerations
-
-The design uses managed, serverless services, but charges may apply for requests, Lambda execution, Step Functions state transitions, SQS requests, S3 storage/requests, DynamoDB activity, SNS, and CloudFront data transfer.
-
-For development and testing:
-
-- Use small test images and a limited number of executions.
-- Monitor AWS Billing and service usage.
-- Configure S3 lifecycle policies when suitable.
-- Remove unused resources after testing.
-- Review current AWS pricing before deployment.
-
-Free Tier eligibility and limits can change, so verify current terms before running the project.
-
----
-
-## Future Improvements
-
-- Add authentication for upload requests.
-- Implement the workflow tasks and retry/Catch policies.
-- Add Terraform or AWS CloudFormation for Infrastructure as Code.
-- Add automated tests and a CI/CD pipeline.
-- Add CloudWatch dashboards and alarms.
-- Support multiple thumbnail sizes and output formats.
-- Define retention and lifecycle policies for originals and processed images.
-
----
-
-## Project Status
-
-This repository contains the architecture diagram and project documentation. It does **not** claim that the complete AWS infrastructure has been deployed or end-to-end tested. The exact resource names, IAM policies, retry thresholds, and environment-specific settings must be configured during implementation.
-
----
-
-## AWS Documentation
-
-- [AWS Architecture Icons](https://aws.amazon.com/architecture/icons/)
-- [Uploading objects using pre-signed URLs](https://docs.aws.amazon.com/AmazonS3/latest/userguide/PresignedUrlUploadObject.html)
+- [AWS SAM documentation](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/what-is-sam.html)
+- [Amazon S3 pre-signed URL uploads](https://docs.aws.amazon.com/AmazonS3/latest/userguide/PresignedUrlUploadObject.html)
 - [Amazon S3 event notifications](https://docs.aws.amazon.com/AmazonS3/latest/userguide/EventNotifications.html)
 - [Using AWS Lambda with Amazon SQS](https://docs.aws.amazon.com/lambda/latest/dg/with-sqs.html)
 - [AWS Step Functions error handling](https://docs.aws.amazon.com/step-functions/latest/dg/concepts-error-handling.html)
-- [Restrict access to an Amazon S3 origin with CloudFront OAC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html)
+- [Restrict access to an S3 origin using CloudFront OAC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html)
+- [Amazon DynamoDB UpdateItem](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_UpdateItem.html)
+- [AWS Lambda environment variables](https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html)
 
----
-
-## Key Learning Outcomes
-
-This project demonstrates the design of an event-driven, serverless system using object storage, asynchronous messaging, workflow orchestration, metadata storage, notifications, and content delivery.
-
-Core architecture pattern:
+## Core architecture pattern
 
 ```text
-Upload → Event → Queue → Process → Store → Notify → Deliver
+Upload -> Event -> Queue -> Orchestrate -> Process -> Store -> Notify -> Deliver
 ```
