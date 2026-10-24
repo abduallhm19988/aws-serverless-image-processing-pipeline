@@ -23,7 +23,7 @@
 <path d="M462 225 V163 H75 V239" fill="none" stroke="#7B61A8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7 6" marker-end="url(#arrow)"/>
 <text x="275" y="153" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#7B61A8" font-weight="700" text-anchor="middle">Returns temporary pre-signed URL</text>
 <path d="M125 318 V385 H688 V325" fill="none" stroke="#26946E" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#greenArrow)"/>
-<text x="397" y="376" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#218362" font-weight="700" text-anchor="middle">PUT image directly to private source bucket</text>
+<text x="397" y="376" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#218362" font-weight="700" text-anchor="middle">Client uploads with Lambda-generated pre-signed URL</text>
 <path d="M726 260 H785 V465 H870 V489" fill="none" stroke="#64748B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
 <text x="825" y="448" font-family="Arial,Helvetica,sans-serif" font-size="14" fill="#526174" font-weight="700" text-anchor="middle">ObjectCreated → SQS</text>
 <path d="M910 530 H1004" fill="none" stroke="#64748B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
