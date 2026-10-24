@@ -386,7 +386,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The tests use dummy AWS credentials to avoid accessing your account. They exercise pure validation/parsing helpers; they do not replace an integration test against a deployed AWS stack.
+The tests use dummy AWS credentials to avoid accessing your account. They exercise pure validation/parsing helpers; they do not replace an integration test against a deployed AWS stack. GitHub Actions also runs the unit tests, `sam validate --lint`, and `sam build --use-container` on pushes and pull requests.
 
 ## Limitations and next steps
 

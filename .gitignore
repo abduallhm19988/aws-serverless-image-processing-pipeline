@@ -10,3 +10,5 @@ terraform.tfstate.*
 .venv/
 __pycache__/
 *.py[cod]
+samconfig.toml
+.pytest_cache/
