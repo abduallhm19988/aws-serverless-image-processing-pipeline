@@ -6,9 +6,7 @@
 
 ![AWS Serverless Image Processing Pipeline](./architecture/architecture-diagram.svg)
 
-The diagram follows the course reference architecture, with a few reliability and operations details made explicit. The diagram in this repository is a newly authored version using AWS Architecture Icons; the course reference is linked below.
-
-**Reference repository:** [Hatem979 — Serverless Image Processing Pipeline with S3, SQS and Lambda](https://github.com/Hatem979/Serverless-Image-Processing-Pipeline-with-S3-SQS-Lambda)
+This diagram presents the system components and their interactions, including asynchronous processing, delivery, monitoring, and failure handling.
 
 ## What does the project do?
 
@@ -90,9 +88,8 @@ The queue acts as a buffer. Upload speed and processing speed can vary independe
 
 This repository currently contains the architecture diagram and documentation. It does **not** claim that the AWS resources have been deployed or end-to-end tested. Resource names, queue policies, IAM policies, retry limits, and environment-specific configuration must be set during implementation.
 
-## References
+## AWS Documentation
 
-- [Course reference repository](https://github.com/Hatem979/Serverless-Image-Processing-Pipeline-with-S3-SQS-Lambda)
 - [Official AWS Architecture Icons](https://aws.amazon.com/architecture/icons/)
 - [Amazon S3 event notifications](https://docs.aws.amazon.com/AmazonS3/latest/userguide/EventNotifications.html)
 - [S3 event notification destinations and requirements](https://docs.aws.amazon.com/AmazonS3/latest/userguide/notification-how-to-event-types-and-destinations.html)
