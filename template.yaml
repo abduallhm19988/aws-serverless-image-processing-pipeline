@@ -40,6 +40,65 @@ Parameters:
     Default: 800
     MinValue: 64
     MaxValue: 4096
+  QueueProcessorTimeoutSeconds:
+    Type: Number
+    Default: 30
+    MinValue: 3
+    MaxValue: 900
+    Description: Maximum runtime for the Lambda that starts Step Functions.
+  ImageProcessorTimeoutSeconds:
+    Type: Number
+    Default: 60
+    MinValue: 3
+    MaxValue: 900
+  ImageProcessorMemoryMB:
+    Type: Number
+    Default: 1024
+    MinValue: 128
+    MaxValue: 10240
+  ImageProcessorEphemeralStorageMB:
+    Type: Number
+    Default: 1024
+    MinValue: 512
+    MaxValue: 10240
+  QueueVisibilityTimeoutSeconds:
+    Type: Number
+    Default: 180
+    MinValue: 1
+    MaxValue: 43200
+    Description: Keep this at least six times QueueProcessorTimeoutSeconds.
+  QueueRetentionSeconds:
+    Type: Number
+    Default: 345600
+    MinValue: 60
+    MaxValue: 1209600
+  DeadLetterRetentionSeconds:
+    Type: Number
+    Default: 1209600
+    MinValue: 60
+    MaxValue: 1209600
+  MaxQueueReceiveCount:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    MaxValue: 1000
+  CloudFrontPriceClass:
+    Type: String
+    Default: PriceClass_100
+    AllowedValues:
+      - PriceClass_100
+      - PriceClass_200
+      - PriceClass_All
+  CloudFrontDefaultTtlSeconds:
+    Type: Number
+    Default: 86400
+    MinValue: 0
+    MaxValue: 31536000
+  CloudFrontMaxTtlSeconds:
+    Type: Number
+    Default: 31536000
+    MinValue: 0
+    MaxValue: 31536000
   NotificationEmail:
     Type: String
     Default: ''
@@ -98,19 +157,19 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub '${AWS::StackName}-image-processing-dlq'
-      MessageRetentionPeriod: 1209600
+      MessageRetentionPeriod: !Ref DeadLetterRetentionSeconds
       SqsManagedSseEnabled: true
 
   ProcessingQueue:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub '${AWS::StackName}-image-processing-queue'
-      VisibilityTimeout: 180
-      MessageRetentionPeriod: 345600
+      VisibilityTimeout: !Ref QueueVisibilityTimeoutSeconds
+      MessageRetentionPeriod: !Ref QueueRetentionSeconds
       SqsManagedSseEnabled: true
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt ProcessingDeadLetterQueue.Arn
-        maxReceiveCount: 3
+        maxReceiveCount: !Ref MaxQueueReceiveCount
 
   ProcessingQueuePolicy:
     Type: AWS::SQS::QueuePolicy
@@ -206,7 +265,7 @@ Resources:
       DistributionConfig:
         Enabled: true
         Comment: !Sub '${AWS::StackName} processed image delivery'
-        PriceClass: PriceClass_100
+        PriceClass: !Ref CloudFrontPriceClass
         HttpVersion: http2and3
         IPV6Enabled: true
         Origins:
@@ -230,9 +289,9 @@ Resources:
             QueryString: false
             Cookies:
               Forward: none
-          DefaultTTL: 86400
+          DefaultTTL: !Ref CloudFrontDefaultTtlSeconds
           MinTTL: 0
-          MaxTTL: 31536000
+          MaxTTL: !Ref CloudFrontMaxTtlSeconds
         ViewerCertificate:
           CloudFrontDefaultCertificate: true
 
@@ -300,7 +359,7 @@ Resources:
       CodeUri: src/queue_processor/
       Handler: app.lambda_handler
       Description: Consumes S3 event messages from SQS and starts one workflow per image.
-      Timeout: 30
+      Timeout: !Ref QueueProcessorTimeoutSeconds
       Environment:
         Variables:
           STATE_MACHINE_ARN: !Ref ImageProcessingStateMachine
@@ -332,10 +391,10 @@ Resources:
       CodeUri: src/process_image/
       Handler: app.lambda_handler
       Description: Validates and resizes an image, stores the output, and updates its metadata.
-      Timeout: 60
-      MemorySize: 1024
+      Timeout: !Ref ImageProcessorTimeoutSeconds
+      MemorySize: !Ref ImageProcessorMemoryMB
       EphemeralStorage:
-        Size: 1024
+        Size: !Ref ImageProcessorEphemeralStorageMB
       Environment:
         Variables:
           SOURCE_BUCKET: !Ref SourceBucket

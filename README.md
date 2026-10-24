@@ -194,6 +194,9 @@ No account ID, fixed Lambda ARN, or personal bucket name should be embedded in t
 | URL expiry | `UploadUrlExpirationSeconds` parameter | Can be tuned without editing application code |
 | Maximum image size and dimensions | `MaxImageBytes` and `MaxImageDimension` parameters | Lets the deployment adjust processing limits |
 | Browser origin | `AllowedOrigin` parameter | Configure the actual frontend domain instead of leaving a wildcard in production |
+| Queue timeout, visibility timeout, retention and DLQ threshold | Queue-related template parameters | Tune buffering and retries; keep visibility timeout at least six times the Queue Processor timeout |
+| Image-processing timeout, memory and temporary storage | `ImageProcessorTimeoutSeconds`, `ImageProcessorMemoryMB`, `ImageProcessorEphemeralStorageMB` | Tune image workloads without editing Python code |
+| CloudFront price class and cache TTLs | CloudFront template parameters | Balance edge coverage, caching and cost |
 | Optional email | `NotificationEmail` parameter | Can enable one email subscription without editing the template |
 
 The value from an example like `my-destination-images-bucket-859816906510-us-east-1-an` must **not** be copied as-is. It includes an account-specific-looking suffix and may not exist in your account. Supply your own globally unique lowercase bucket names during deployment. Do not hard-code account IDs or Region strings into handlers.
