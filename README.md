@@ -16,7 +16,7 @@ The architecture also includes an SQS Dead-Letter Queue (DLQ) for messages that 
 
 ## Architecture
 
-![Serverless Image Processing Pipeline Architecture](./architecture-diagram.svg)
+![Serverless Image Processing Pipeline Architecture](./architecture-diagram.png)
 
 ### Architecture Flow
 
@@ -190,6 +190,176 @@ CloudFront serves the processed object from the destination S3 bucket. Configure
 
 ---
 
+## Implementation Examples
+
+The following snippets explain how the main pieces can be implemented. They are templates: resource names, IAM permissions, payload shape, retry configuration, and environment variables must match the actual deployment. The presence of code examples in this README does not by itself mean that the full system is deployed.
+
+### Image-processing Lambda (Python, Boto3, Pillow)
+
+Configure these Lambda environment variables instead of hard-coding account-specific values:
+
+- \`DEST_BUCKET\`: name of the destination S3 bucket.
+- \`TABLE_NAME\`: DynamoDB metadata table name.
+
+Package Pillow in the deployment artifact or a compatible Lambda layer. The execution role needs permission to read the source object, write the processed destination object, and update the relevant DynamoDB item.
+
+\`\`\`python
+import io
+import os
+from pathlib import PurePosixPath
+
+import boto3
+from PIL import Image, UnidentifiedImageError
+
+s3 = boto3.client("s3")
+dynamodb = boto3.resource("dynamodb")
+
+DEST_BUCKET = os.environ["DEST_BUCKET"]
+TABLE_NAME = os.environ["TABLE_NAME"]
+table = dynamodb.Table(TABLE_NAME)
+
+
+def lambda_handler(event, context):
+    # Expected Step Functions input: {"bucket": "...", "key": "..."}
+    payload = event.get("Payload", event)
+    bucket = payload.get("bucket")
+    key = payload.get("key")
+
+    if not bucket or not key:
+        raise ValueError("Input must contain 'bucket' and 'key'.")
+
+    # Use only the filename locally; the S3 key remains the object identifier.
+    filename = PurePosixPath(key).name
+    if not filename:
+        raise ValueError("Invalid source object key.")
+
+    download_path = f"/tmp/{filename}"
+
+    try:
+        # 1. Download the original image from source S3.
+        s3.download_file(bucket, key, download_path)
+
+        # 2. Resize while preserving the aspect ratio.
+        with Image.open(download_path) as image:
+            image.thumbnail((800, 800))
+            image_format = (image.format or "JPEG").upper()
+
+            if image_format not in {"JPEG", "PNG", "WEBP"}:
+                image_format = "JPEG"
+
+            if image_format == "JPEG" and image.mode not in {"RGB", "L"}:
+                image = image.convert("RGB")
+
+            output = io.BytesIO()
+            image.save(output, format=image_format)
+            output.seek(0)
+
+        # 3. Store the result in the separate destination bucket.
+        extension = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}[image_format]
+        dest_key = f"processed/{PurePosixPath(key).stem}-processed.{extension}"
+        content_type = {
+            "JPEG": "image/jpeg",
+            "PNG": "image/png",
+            "WEBP": "image/webp",
+        }[image_format]
+
+        s3.put_object(
+            Bucket=DEST_BUCKET,
+            Key=dest_key,
+            Body=output.getvalue(),
+            ContentType=content_type,
+        )
+
+        # 4. Update metadata. ImageId must match your table's actual partition key.
+        table.update_item(
+            Key={"ImageId": key},
+            UpdateExpression="SET #status = :completed, ProcessedKey = :processed_key",
+            ExpressionAttributeNames={"#status": "Status"},
+            ExpressionAttributeValues={
+                ":completed": "COMPLETED",
+                ":processed_key": dest_key,
+            },
+        )
+
+        return {
+            "status": "COMPLETED",
+            "sourceBucket": bucket,
+            "sourceKey": key,
+            "destinationBucket": DEST_BUCKET,
+            "processedKey": dest_key,
+        }
+
+    except (UnidentifiedImageError, OSError) as exc:
+        # Step Functions should catch this error and run the failure path.
+        raise ValueError(f"Unsupported or unreadable image: {key}") from exc
+\`\`\`
+
+**Important implementation notes**
+
+- The Queue Processor must translate the S3 event record into the workflow input shape \`{"bucket": "...", "key": "..."}\`.
+- The DynamoDB table's primary key must match the code. Adjust \`ImageId\` and the update expression to your schema.
+- Add explicit maximum file size, allowed formats, safe image decoding, memory/timeout settings, and idempotency before production use.
+- The example resizes images; watermarking is a separate processing step that must be implemented if required.
+- Treat the uploaded file as untrusted input. A filename extension or content-type header alone does not prove that a file is a valid image.
+
+### Step Functions state-machine example (ASL)
+
+This simplified example invokes the processing Lambda and then publishes a success notification. Replace the placeholder strings during deployment, and add a real failure handler that updates DynamoDB and optionally publishes a failure notification.
+
+\`\`\`json
+{
+  "Comment": "Serverless image processing workflow",
+  "StartAt": "ProcessImage",
+  "States": {
+    "ProcessImage": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "REPLACE_WITH_PROCESS_IMAGE_FUNCTION_ARN",
+        "Payload.$": "$"
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "ProcessingFailed"
+        }
+      ],
+      "Next": "SendSuccessNotification"
+    },
+    "SendSuccessNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "REPLACE_WITH_SNS_TOPIC_ARN",
+        "Message.$": "States.JsonToString($)"
+      },
+      "End": true
+    },
+    "ProcessingFailed": {
+      "Type": "Fail",
+      "Error": "ImageProcessingFailed",
+      "Cause": "Processing failed; configure a failure handler to update metadata and notify subscribers."
+    }
+  }
+}
+\`\`\`
+
+This is a teaching template, not a drop-in production definition. Validate the Amazon States Language definition and use real ARNs and least-privilege execution-role permissions. A production Catch path should update the DynamoDB status to \`FAILED\` and can publish an SNS failure notification before ending.
+
 ## Reliability and Failure Handling
 
 ### SQS retries and Dead-Letter Queue
@@ -313,6 +483,28 @@ Configure alarms for sustained errors, growing queue age, DLQ messages, and fail
 - [ ] Uploading a processed object does not start an unintended processing loop.
 
 ---
+
+## Screenshots
+
+Use screenshots as evidence of what has actually been configured or tested. Add the corresponding image files under \`screenshots/\` and update the names below to match the repository. Do not claim a screenshot proves successful end-to-end processing unless it shows that result.
+
+- **S3 Event Notification:** source S3 bucket notification targeting the SQS processing queue.
+- **SQS and DLQ:** queue redrive policy and dead-letter queue configuration.
+- **Step Functions Workflow:** state-machine graph or a successful/failed execution.
+- **Successful Processing:** processed output in destination S3 and its metadata status.
+
+## Project Structure
+
+The architecture PNG is currently at the repository root, so the Architecture section references it as \`./architecture-diagram.png\`.
+
+\`\`\`text
+aws-serverless-image-processing-pipeline/
+├── README.md
+├── architecture-diagram.png
+├── architecture-diagram.svg
+└── screenshots/
+    └── (implementation screenshots, if added)
+\`\`\`
 
 ## Cost Considerations
 
