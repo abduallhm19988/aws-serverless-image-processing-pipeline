@@ -152,8 +152,12 @@ CloudFront delivers objects from the private destination bucket through OAC. A v
 
 ```text
 aws-serverless-image-processing-pipeline/
-├── README.md
+├── .github/
+│   └── workflows/
+│       └── ci.yml
+├── .gitignore
 ├── LICENSE
+├── README.md
 ├── template.yaml
 ├── samconfig.toml.example
 ├── requirements-dev.txt
