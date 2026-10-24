@@ -4,7 +4,7 @@
 
 ## Architecture Overview
 
-![AWS Serverless Image Processing Pipeline](./architecture/architecture-diagram.svg)
+![AWS Serverless Image Processing Pipeline](./architecture-diagram.svg)
 
 This diagram presents the system components and their interactions, including asynchronous processing, delivery, monitoring, and failure handling.
 
