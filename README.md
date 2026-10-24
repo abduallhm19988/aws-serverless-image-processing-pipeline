@@ -207,6 +207,7 @@ Install and configure:
 - AWS CLI with credentials for the target account.
 - AWS SAM CLI.
 - Python 3.12.
+- Docker Desktop (or Docker Engine) running, so Pillow can be built in a Lambda-compatible Linux environment.
 - A deployment role/user allowed to create the resources in `template.yaml`.
 
 Review the current AWS service pricing before deploying. This template creates a CloudFront distribution and enables DynamoDB point-in-time recovery, in addition to the Lambda, S3, SQS, Step Functions, SNS, API Gateway, and CloudWatch resources.
@@ -217,10 +218,10 @@ From the repository root:
 
 ```bash
 sam validate --lint
-sam build
+sam build --use-container
 ```
 
-The SAM build packages the Pillow dependency from `src/process_image/requirements.txt`.
+The SAM build packages the Pillow dependency from `src/process_image/requirements.txt`. The `--use-container` option builds dependencies in a Lambda-compatible container, which avoids accidentally packaging a Windows/macOS Pillow binary for Lambda.
 
 ### 2. Deploy
 
@@ -275,6 +276,16 @@ Save the response as `response.json` and use a local JPEG file named `sample.jpg
 curl -X PUT "$(jq -r .upload_url response.json)" \
   -H "Content-Type: image/jpeg" \
   --data-binary "@sample.jpg"
+```
+
+
+On Windows PowerShell, the same request/upload flow can be run without `curl`/ `jq` parsing:
+
+```powershell
+$endpoint = "YOUR_UPLOAD_URL_ENDPOINT"
+$body = @{ original_filename = "sample.jpg"; content_type = "image/jpeg" } | ConvertTo-Json
+$response = Invoke-RestMethod -Method Post -Uri $endpoint -ContentType "application/json" -Body $body
+Invoke-WebRequest -Method Put -Uri $response.upload_url -ContentType "image/jpeg" -InFile ".\sample.jpg"
 ```
 
 The `Content-Type` must match the value used to sign the URL. Do not share the returned pre-signed URL; it grants temporary upload access.
