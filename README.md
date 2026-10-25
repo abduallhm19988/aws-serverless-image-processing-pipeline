@@ -108,7 +108,7 @@ The API returns an `image_id`, a temporary `upload_url`, the required `Content-T
 
 ### 2. Upload directly to S3
 
-Use HTTP `PUT` to the returned URL, including the exact `Content-Type` header returned by the API. The source bucket remains private. The key is generated server-side under `incoming/`, rather than trusting a user-supplied path.
+Use HTTP `PUT` to the returned URL, including the exact `Content-Type` header returned by the API. The source bucket remains private. The key is generated server-side under `incoming/`, rather than trusting a user-supplied path. A pre-signed URL is not single-use: until it expires, another PUT to that URL can overwrite the same source key. Use each URL once and request a new URL for each upload.
 
 The configured maximum image size is checked by the processing Lambda before it downloads the object. **A pre-signed PUT URL does not impose a maximum-size range by itself**, so an oversized file may reach S3 before processing rejects it. For strict upload-time size enforcement, consider a pre-signed POST policy with a `content-length-range` condition or a separate upload control.
 
@@ -413,6 +413,7 @@ The tests use dummy AWS credentials to avoid accessing your account. They exerci
 - [Amazon S3 pre-signed URL uploads](https://docs.aws.amazon.com/AmazonS3/latest/userguide/PresignedUrlUploadObject.html)
 - [Amazon S3 event notifications](https://docs.aws.amazon.com/AmazonS3/latest/userguide/EventNotifications.html)
 - [Using AWS Lambda with Amazon SQS](https://docs.aws.amazon.com/lambda/latest/dg/with-sqs.html)
+- [Configuring an SQS event source mapping and visibility timeout](https://docs.aws.amazon.com/lambda/latest/dg/services-sqs-configure.html)
 - [AWS Step Functions error handling](https://docs.aws.amazon.com/step-functions/latest/dg/concepts-error-handling.html)
 - [Restrict access to an S3 origin using CloudFront OAC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html)
 - [CloudFront cache policies](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/controlling-the-cache-key.html)
