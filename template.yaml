@@ -424,6 +424,7 @@ Resources:
             - Effect: Allow
               Action:
                 - s3:PutObject
+                - s3:AbortMultipartUpload
               Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationBucketName}/processed/*'
             - Effect: Allow
               Action:

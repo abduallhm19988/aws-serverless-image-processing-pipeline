@@ -29,6 +29,22 @@ SUPPORTED_FORMATS = {
 }
 
 
+def validate_image_format(actual_format, declared_content_type):
+    """Return the output extension and MIME type only when the decoded format matches S3 metadata."""
+    details = SUPPORTED_FORMATS.get((actual_format or "").upper())
+    if details is None:
+        raise ValueError("Only JPEG, PNG, and WEBP images are supported")
+
+    expected_content_type = details[1]
+    supplied_content_type = (declared_content_type or "").split(";", 1)[0].strip().lower()
+    if supplied_content_type != expected_content_type:
+        raise ValueError(
+            f"Image bytes decode as {expected_content_type}, "
+            f"but S3 metadata declares {supplied_content_type or 'no Content-Type'}"
+        )
+    return details
+
+
 def _update_status(image_id, status, **attributes):
     names = {"#status": "Status"}
     values = {
@@ -83,8 +99,10 @@ def lambda_handler(event, context):
 
         with Image.open(local_path) as opened:
             actual_format = (opened.format or "").upper()
-            if actual_format not in SUPPORTED_FORMATS:
-                raise ValueError("Only JPEG, PNG, and WEBP images are supported")
+            extension, content_type = validate_image_format(
+                actual_format,
+                head.get("ContentType", ""),
+            )
 
             # Force decoding while the file is open. EXIF orientation is corrected
             # before the image is resized, so portrait images keep the expected direction.
@@ -92,7 +110,6 @@ def lambda_handler(event, context):
             image = ImageOps.exif_transpose(opened)
             image.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION))
 
-            extension, content_type = SUPPORTED_FORMATS[actual_format]
             if actual_format == "JPEG" and image.mode not in {"RGB", "L"}:
                 image = image.convert("RGB")
 

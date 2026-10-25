@@ -27,6 +27,7 @@ def load_module(name, path):
 
 upload = load_module("upload_url_app", "src/upload_url/app.py")
 queue_processor = load_module("queue_processor_app", "src/queue_processor/app.py")
+image_processor = load_module("process_image_app", "src/process_image/app.py")
 
 
 @pytest.mark.parametrize(
@@ -91,3 +92,27 @@ def test_execution_name_is_stable_and_safe():
     assert first == second
     assert len(first) <= 80
     assert all(char.isalnum() or char in "-_" for char in first)
+
+
+@pytest.mark.parametrize(
+    ("actual_format", "declared_content_type", "expected"),
+    [
+        ("JPEG", "image/jpeg", ("jpg", "image/jpeg")),
+        ("PNG", "image/png", ("png", "image/png")),
+        ("WEBP", "image/webp", ("webp", "image/webp")),
+    ],
+)
+def test_image_format_must_match_declared_content_type(
+    actual_format, declared_content_type, expected
+):
+    assert image_processor.validate_image_format(actual_format, declared_content_type) == expected
+
+
+def test_image_format_rejects_mismatched_content_type():
+    with pytest.raises(ValueError, match="metadata declares"):
+        image_processor.validate_image_format("PNG", "image/jpeg")
+
+
+def test_image_format_rejects_unsupported_format():
+    with pytest.raises(ValueError, match="Only JPEG, PNG, and WEBP"):
+        image_processor.validate_image_format("GIF", "image/gif")

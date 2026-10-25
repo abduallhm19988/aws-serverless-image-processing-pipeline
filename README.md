@@ -122,7 +122,7 @@ The Queue Processor parses the S3 event, URL-decodes the object key, and builds 
 
 ### 5. Process, store, and update metadata
 
-The image-processing Lambda checks the source bucket and object prefix, checks the object size, downloads the original image into the Lambda temporary directory, validates that Pillow can decode an allowed image format, resizes it while preserving aspect ratio, uploads the result to `processed/` in the destination bucket, and updates DynamoDB.
+The image-processing Lambda checks the source bucket and object prefix, checks the object size, downloads the original image into the Lambda temporary directory, validates that Pillow can decode an allowed image format and that the actual format matches the declared S3 `Content-Type`, resizes it while preserving aspect ratio, uploads the result to `processed/` in the destination bucket, and updates DynamoDB.
 
 Example metadata item:
 
@@ -336,7 +336,7 @@ In the AWS console or using the AWS CLI:
 | `src/failure_handler/app.py` | Marks the job as failed and publishes a failure notification |
 | `statemachine/image-processing.asl.json` | Defines processing, retries, success notification, and the workflow failure path |
 | `template.yaml` | Creates the S3 buckets, queue/DLQ, IAM permissions, Lambda functions, state machine, table, topic, API Gateway, and CloudFront distribution |
-| `tests/test_helpers.py` | Tests request validation, S3 event parsing, and stable workflow execution-name behavior |
+| `tests/test_helpers.py` | Tests request validation, S3 event parsing, stable execution names, and decoded image-format/content-type consistency |
 | `architecture/architecture-diagram.png` | Visual overview of the end-to-end design |
 
 ## Reliability and error handling
@@ -369,6 +369,17 @@ S3 notifications and SQS use at-least-once delivery. The Queue Processor derives
 Use CloudWatch metrics and logs to investigate Lambda errors/duration, SQS queue depth and age, DLQ messages, failed Step Functions executions, and CloudFront request/error behavior. Consider adding alarms for sustained failures, old messages, and any non-empty DLQ.
 
 This design is serverless, not automatically free. Requests and usage may incur charges for API Gateway, Lambda, Step Functions state transitions, SQS, S3 storage/requests, DynamoDB, SNS, CloudWatch logs, and CloudFront data transfer. DynamoDB point-in-time recovery is enabled in the template and can also incur charges. Check current pricing before deploying and use a small test workload.
+
+## Screenshots and deployment evidence
+
+The `screenshots/` folder currently contains instructions only; it does not contain screenshots from a live AWS account. After you deploy and run the workflow, add your own captures, for example:
+
+- `screenshots/s3-event.png` — source bucket notification configuration.
+- `screenshots/sqs-dlq.png` — processing queue and redrive policy.
+- `screenshots/step-functions.png` — a real state-machine execution.
+- `screenshots/processing-result.png` — processed S3 object and matching DynamoDB status.
+
+Only embed screenshots after those files have been added, and redact account identifiers or other sensitive details before publishing them.
 
 ## Clean up
 

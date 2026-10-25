@@ -1,2 +1,3 @@
+-r src/process_image/requirements.txt
 pytest>=8,<9
 boto3>=1.34,<2
