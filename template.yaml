@@ -79,9 +79,10 @@ Parameters:
     MaxValue: 1209600
   MaxQueueReceiveCount:
     Type: Number
-    Default: 3
+    Default: 5
     MinValue: 1
     MaxValue: 1000
+    Description: AWS recommends at least 5 receives before moving messages to the DLQ.
   CloudFrontPriceClass:
     Type: String
     Default: PriceClass_100
@@ -259,6 +260,24 @@ Resources:
         SigningBehavior: always
         SigningProtocol: sigv4
 
+  ProcessedImagesCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${AWS::StackName}-processed-images-cache'
+        Comment: Cache processed image keys without forwarding cookies, headers, or query strings.
+        DefaultTTL: !Ref CloudFrontDefaultTtlSeconds
+        MaxTTL: !Ref CloudFrontMaxTtlSeconds
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
   ProcessedImagesDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -285,13 +304,7 @@ Resources:
             - GET
             - HEAD
           Compress: true
-          ForwardedValues:
-            QueryString: false
-            Cookies:
-              Forward: none
-          DefaultTTL: !Ref CloudFrontDefaultTtlSeconds
-          MinTTL: 0
-          MaxTTL: !Ref CloudFrontMaxTtlSeconds
+          CachePolicyId: !Ref ProcessedImagesCachePolicy
         ViewerCertificate:
           CloudFrontDefaultCertificate: true
 

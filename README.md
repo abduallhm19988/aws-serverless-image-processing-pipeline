@@ -30,9 +30,9 @@ An event-driven serverless image-processing project built with AWS managed servi
 
 A client asks Amazon API Gateway for a temporary Amazon S3 pre-signed URL. The Upload URL Lambda creates a unique object key and a URL that permits an upload to the private source bucket. The client then uploads the image **directly to S3**—the image bytes do not pass through API Gateway or Lambda.
 
-An S3 `ObjectCreated` event is sent to an SQS processing queue. The Queue Processor Lambda consumes the message and starts an AWS Step Functions execution. The workflow runs the image-processing Lambda, stores the resized result in a separate private S3 bucket, updates DynamoDB metadata, and publishes a success notification through SNS. If a workflow task fails, a failure handler records the failed status and publishes a failure notification.
+An S3 `ObjectCreated` event is sent to an SQS processing queue. The Queue Processor Lambda consumes the message and starts an AWS Step Functions execution. The workflow runs the image-processing Lambda, stores the resized result in a separate private S3 bucket, updates DynamoDB metadata, and publishes a success notification through SNS. If the image-processing task fails, a failure handler records the failed status and publishes a failure notification.
 
-CloudFront uses Origin Access Control (OAC) to deliver processed images without making the destination bucket public. Amazon CloudWatch collects logs and service metrics.
+CloudFront uses Origin Access Control (OAC) to deliver processed images without making the destination bucket public. A dedicated cache policy controls TTLs and avoids forwarding cookies, headers, or query strings that this application does not need. Amazon CloudWatch collects logs and service metrics.
 
 **Scope:** the repository includes application source files and an AWS SAM template intended to deploy the demonstrated architecture. You still need to configure unique S3 bucket names, deploy it in your account, verify the generated resources, and run the tests below. A checked-in template is not proof that a live stack has already been deployed or tested.
 
@@ -201,6 +201,7 @@ No account ID, fixed Lambda ARN, or personal bucket name should be embedded in t
 | Queue timeout, visibility timeout, retention and DLQ threshold | Queue-related template parameters | Tune buffering and retries; keep visibility timeout at least six times the Queue Processor timeout |
 | Image-processing timeout, memory and temporary storage | `ImageProcessorTimeoutSeconds`, `ImageProcessorMemoryMB`, `ImageProcessorEphemeralStorageMB` | Tune image workloads without editing Python code |
 | CloudFront price class and cache TTLs | CloudFront template parameters | Balance edge coverage, caching and cost |
+| SQS receive-count threshold | `MaxQueueReceiveCount` (default 5) | AWS recommends a threshold of at least five receives before a message is moved to a DLQ |
 | Optional email | `NotificationEmail` parameter | Can enable one email subscription without editing the template |
 
 The value from an example like `my-destination-images-bucket-859816906510-us-east-1-an` must **not** be copied as-is. It includes an account-specific-looking suffix and may not exist in your account. Supply your own globally unique lowercase bucket names during deployment. Do not hard-code account IDs or Region strings into handlers.
@@ -268,9 +269,11 @@ CloudFormation-generated ARNs are wired into the template automatically; you do 
 Replace the endpoint with your `UploadUrlEndpoint` output:
 
 ```bash
-curl -X POST "YOUR_UPLOAD_URL_ENDPOINT" \
+curl -sS -X POST "YOUR_UPLOAD_URL_ENDPOINT" \
   -H "Content-Type: application/json" \
-  -d '{"original_filename":"sample.jpg","content_type":"image/jpeg"}'
+  -d '{"original_filename":"sample.jpg","content_type":"image/jpeg"}' \
+  -o response.json
+cat response.json
 ```
 
 The response contains `upload_url` and `image_id`.
@@ -412,6 +415,7 @@ The tests use dummy AWS credentials to avoid accessing your account. They exerci
 - [Using AWS Lambda with Amazon SQS](https://docs.aws.amazon.com/lambda/latest/dg/with-sqs.html)
 - [AWS Step Functions error handling](https://docs.aws.amazon.com/step-functions/latest/dg/concepts-error-handling.html)
 - [Restrict access to an S3 origin using CloudFront OAC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html)
+- [CloudFront cache policies](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/controlling-the-cache-key.html)
 - [Amazon DynamoDB UpdateItem](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_UpdateItem.html)
 - [AWS Lambda environment variables](https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html)
 
