@@ -40,6 +40,12 @@ Parameters:
     Default: 800
     MinValue: 64
     MaxValue: 4096
+  MaxImagePixels:
+    Type: Number
+    Default: 40000000
+    MinValue: 1000000
+    MaxValue: 100000000
+    Description: Maximum decoded image pixel count, checked before loading pixel data.
   QueueProcessorTimeoutSeconds:
     Type: Number
     Default: 30
@@ -415,6 +421,7 @@ Resources:
           TABLE_NAME: !Ref ImageMetadataTable
           MAX_IMAGE_BYTES: !Ref MaxImageBytes
           MAX_IMAGE_DIMENSION: !Ref MaxImageDimension
+          MAX_IMAGE_PIXELS: !Ref MaxImagePixels
       Policies:
         - Statement:
             - Effect: Allow
