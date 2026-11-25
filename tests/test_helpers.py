@@ -108,6 +108,20 @@ def test_image_format_must_match_declared_content_type(
     assert image_processor.validate_image_format(actual_format, declared_content_type) == expected
 
 
+def test_image_dimensions_accept_within_pixel_limit():
+    image_processor.validate_image_dimensions(4000, 4000, 16_000_000)
+
+
+def test_image_dimensions_reject_above_pixel_limit():
+    with pytest.raises(ValueError, match="configured limit"):
+        image_processor.validate_image_dimensions(5000, 5000, 20_000_000)
+
+
+def test_image_dimensions_reject_zero_or_negative_values():
+    with pytest.raises(ValueError, match="must be positive"):
+        image_processor.validate_image_dimensions(0, 100, 1_000)
+
+
 def test_image_format_rejects_mismatched_content_type():
     with pytest.raises(ValueError, match="metadata declares"):
         image_processor.validate_image_format("PNG", "image/jpeg")
