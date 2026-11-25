@@ -114,7 +114,10 @@ def lambda_handler(event, context):
             "method": "PUT",
             "required_headers": {"Content-Type": content_type},
             "expires_in_seconds": URL_EXPIRATION_SECONDS,
-            "max_upload_bytes": MAX_UPLOAD_BYTES,
-            "message": "Upload the file directly to S3 using the returned URL.",
+            "max_image_bytes": MAX_UPLOAD_BYTES,
+            "message": (
+                "Upload the file directly to S3 using the returned URL. "
+                "The image size limit is checked during processing after upload."
+            ),
         },
     )
